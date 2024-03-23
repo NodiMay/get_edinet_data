@@ -12,6 +12,7 @@ tables = "*"
 install = "*"
 h5py = "*"
 openpyxl = "*"
+numpy = "*"
 
 [dev-packages]
 

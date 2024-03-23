@@ -8,6 +8,7 @@ import time
 import uuid
 import tempfile
 import re
+import numpy as np
 from shutil import copyfileobj
 from zipfile import ZipFile
 from src.common.logger import SimpleLogger
@@ -146,16 +147,6 @@ class EdinetUtils:
         
         query_response = manager.get_with_compound_conditions(**select_conditions)
 
-        
-        # for document_list in query_response:
-        #     self.logger.info(f"doc_id: {document_list.docID}")
-        #     self.logger.info(f"edinet_code: {document_list.edinetCode}")
-        #     self.logger.info(f"submit_date_time: {document_list.submitDateTime}")
-        #     self.logger.info(f"doc_type: {document_list.docTypeCode}")
-        #     self.logger.info(f"doc_description: {document_list.filerName}")
-    
-        #     self.download_document(document_list.docID, edinet_code=document_list.edinetCode, doc_type=1)
-
         self.logger.info("end: get_doc_id_list")
 
         print([f"{document_list_table.docID},{document_list_table.edinetCode},{document_list_table.submitDateTime}" for document_list_table in query_response])
@@ -177,6 +168,7 @@ class EdinetUtils:
             '用途区分、財務諸表区分及び業種区分のラベル（英語）': 'classificationLabelEn',
             '名前空間プレフィックス': 'namespacePrefix',
             '要素名': 'elementName',
+            'elementId': 'elementId',
             'type': 'type',
             'substitutionGroup': 'substitutionGroup',
             'periodType': 'periodType',
@@ -186,21 +178,123 @@ class EdinetUtils:
             'documentationラベル（日本語）': 'documentationLabelJp',
             'documentationラベル（英語）': 'documentationLabelEn',
             '参照リンク': 'referenceLink',
-            'Document Information': 'documentInformation'
+            'Document Information': 'documentInformation',
+            'parentElementName': 'parentElementName',
+            'parentStandardLabelTree': 'parentStandardLabelTree',
+            'parentDetailedLabelTree': 'parentDetailedLabelTree',
+            'submitDateTime': 'submitDateTime'
         }
         tag_df = pd.read_excel(file_path, sheet_name="9", header=1)
         tag_df.dropna(how='all', subset=['要素名'], inplace=True)
         tag_df.dropna(how='all', inplace=True)
         tag_df.fillna(method='ffill', inplace=True)
-        print(tag_df.head(10))
         print(tag_df.columns)
+    
         tag_df.rename(columns=column_name_mapping, inplace=True)
-        print(tag_df.head(10))
+        tag_df['parentElementName'] = np.where(tag_df['depth'] == 0, tag_df['elementName'], np.nan)
+        tag_df['parentStandardLabelTree'] = np.where(tag_df['depth'] == 0, tag_df['standardLabelTree'], np.nan)
+        tag_df['parentDetailedLabelTree'] = np.where(tag_df['depth'] == 0, tag_df['detailedLabelTree'], np.nan)
+        tag_df['parentElementName'].fillna(method='ffill', inplace=True)
+        tag_df['parentStandardLabelTree'].fillna(method='ffill', inplace=True)
+        tag_df['parentDetailedLabelTree'].fillna(method='ffill', inplace=True)
+        tag_df['elementId'] = tag_df['namespacePrefix'] + ':' + tag_df['elementName']
+        tag_df['submitDateTime'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        tag_df['classificationLabelJp'] = tag_df['classificationLabelJp'].str.replace('_x000D_', ' ')
+        tag_df['classificationLabelJp'] = tag_df['classificationLabelJp'].replace(r'\s+|\\n', ' ', regex=True)
+        tag_df['classificationLabelEn'] = tag_df['classificationLabelEn'].str.replace('_x000D_', ' ')
+        tag_df['classificationLabelEn'] = tag_df['classificationLabelEn'].replace(r'\s+|\\n', ' ', regex=True)
+        tag_df['classificationLabelJp'] = tag_df['classificationLabelJp'].str.replace('_x000D_', ' ')
+        tag_df['classificationLabelJp'] = tag_df['classificationLabelJp'].replace(r'\s+|\\n', ' ', regex=True)
+        tag_df['referenceLink'] = tag_df['referenceLink'].str.replace('_x000D_', ' ')
+        tag_df['referenceLink'] = tag_df['referenceLink'].replace(r'\s+|\\n', ' ', regex=True)
+
 
         engine = create_engine(f'sqlite:///{config.EDINET_DB}')
         tag_df.to_sql('tag_table', con=engine, if_exists='replace', index=False)
 
         self.logger.info("end: save_tag_to_db")
+    
+    def save_account_tag_to_db(self, file_path: str):
+        self.logger.info("start: save_account_tag_to_db")
+
+        column_name_mapping = {
+            '科目分類': 'accountClassification',
+            'industry': 'industry',
+            '標準ラベル（日本語）': 'standardLabel',
+            '冗長ラベル（日本語）': 'verboseLabel',
+            '標準ラベル（英語）': 'standardLabelEn',
+            '冗長ラベル（英語）': 'verboseLabelEn',
+            '用途区分、財務諸表区分及び業種区分のラベル（日本語）': 'classificationLabelJp',
+            '用途区分、財務諸表区分及び業種区分のラベル（英語）': 'classificationLabelEn',
+            '名前空間プレフィックス': 'namespacePrefix',
+            '要素名': 'elementName',
+            'type': 'type',
+            'substitutionGroup': 'substitutionGroup',
+            'periodType': 'periodType',
+            'balance': 'balance',
+            'abstract': 'abstract',
+            'depth': 'depth',
+            '参照リンク': 'referenceLink',
+            'parentElementName': 'parentElementName',
+            'parentStandardLabel': 'parentStandardLabel',
+            'submitDateTime': 'submitDateTime'
+        }
+        
+        account_type_list = [
+            "貸借対照表　科目一覧",
+            "損益計算書　科目一覧",
+            "包括利益計算書　科目一覧",
+            "株主資本等変動計算書　科目一覧",
+            "キャッシュ・フロー計算書　科目一覧",
+            "社員資本等変動計算書　科目一覧",
+            "投資主資本等変動計算書　科目一覧",
+            "純資産変動計算書　科目一覧",
+            "純資産変動計算書　科目一覧",
+            "損益及び剰余金計算書　科目一覧",
+        ]
+
+        account_xlsx = pd.ExcelFile(file_path, engine='openpyxl')
+
+        skip_sheet_list = ['目次', '勘定科目リストについて']
+
+        account_df_list = []
+        for sheet_name in account_xlsx.sheet_names:
+            if sheet_name in skip_sheet_list:
+                continue
+            
+            _account_df = pd.read_excel(file_path, sheet_name=sheet_name, header=1)
+            _account_df = _account_df[~_account_df['科目分類'].isin(account_type_list + ['科目分類'] + [np.nan])]
+            _account_df = _account_df[~_account_df['科目分類'].isin(account_type_list + ['科目分類'] + [np.nan])]
+            _account_df['industry'] = sheet_name
+
+            account_df_list.append(_account_df)
+
+        account_df = pd.concat(account_df_list)
+        account_df.rename(columns=column_name_mapping, inplace=True)
+        account_df['parentElementName'] = np.where(account_df['depth'] == 0, account_df['elementName'], np.nan)
+        account_df['parentStandardLabel'] = np.where(account_df['depth'] == 0, account_df['standardLabel'], np.nan)
+
+        account_df.rename(columns=column_name_mapping, inplace=True)
+        account_df['parentElementName'] = np.where(account_df['depth'] == 0, account_df['elementName'], np.nan)
+        account_df['parentStandardLabel'] = np.where(account_df['depth'] == 0, account_df['standardLabel'], np.nan)
+        account_df['parentElementName'].fillna(method='ffill', inplace=True)
+        account_df['parentStandardLabel'].fillna(method='ffill', inplace=True)
+        account_df['elementId'] = account_df['namespacePrefix'] + ':' + account_df['elementName']
+        account_df['submitDateTime'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        account_df['classificationLabelJp'] = account_df['classificationLabelJp'].str.replace('_x000D_', ' ')
+        account_df['classificationLabelJp'] = account_df['classificationLabelJp'].replace(r'\s+|\\n', ' ', regex=True)
+        account_df['classificationLabelEn'] = account_df['classificationLabelEn'].str.replace('_x000D_', ' ')
+        account_df['classificationLabelEn'] = account_df['classificationLabelEn'].replace(r'\s+|\\n', ' ', regex=True)
+        account_df['classificationLabelJp'] = account_df['classificationLabelJp'].str.replace('_x000D_', ' ')
+        account_df['classificationLabelJp'] = account_df['classificationLabelJp'].replace(r'\s+|\\n', ' ', regex=True)
+        account_df['referenceLink'] = account_df['referenceLink'].str.replace('_x000D_', ' ')
+        account_df['referenceLink'] = account_df['referenceLink'].replace(r'\s+|\\n', ' ', regex=True)
+
+        engine = create_engine(f'sqlite:///{config.EDINET_DB}')
+        account_df.to_sql('account_tag_table', con=engine, if_exists='replace', index=False)
+
+        self.logger.info("end: save_account_tag_to_db")
     
     def save_edinet_csv_doc_to_db(self, edinet_code: str, target_date_start: str, target_date_end: str, doc_types: list[str] = ["120"]):
         # TODO: 有価証券報告書以外も対応
@@ -285,6 +379,7 @@ if __name__ == '__main__':
     # edinet_utils.get_doc_infos(days=3653)
     # get_doc_infos(days=3653)
     # df = pd.read_hdf('data/edinet.h5', key='document_list')
-    # edinet_utils.save_tag_to_db("data/excel/ESE140114.xlsx")
-    edinet_utils.save_edinet_csv_doc_to_db("E00015", "2000-01-01", "2024-03-20", ["120"])
+    edinet_utils.save_tag_to_db("data/excel/ESE140114.xlsx")
+    edinet_utils.save_account_tag_to_db("data/excel/ESE140115.xlsx")
+    # edinet_utils.save_edinet_csv_doc_to_db("E00015", "2000-01-01", "2024-03-20", ["120"])
     
