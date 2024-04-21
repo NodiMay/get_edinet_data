@@ -36,11 +36,19 @@ class SqlUtils:
         self.logger.info(f"end: get")
         return results
 
-    def get_with_compound_conditions(self, **filters):
+    def get_with_compound_conditions(self, distinct=False, columns=None, **filters):
        
-        query = self.Session.query(self.model)
         self.logger.info(f"start: get_with_compound_conditions, kwargs: {filters}")
-        
+        if columns:
+            # 指定されたカラムだけを選択
+            query = self.Session.query(*[getattr(self.model, column) for column in columns])
+        else:
+            # モデルの全カラムを選択
+            query = self.Session.query(self.model)
+            
+        if distinct:
+            # Distinctを適用
+            query = query.distinct()
         # その他の条件をconditionsリストに追加
         conditions = []
         for key, value in filters.items():
@@ -63,7 +71,7 @@ class SqlUtils:
             elif value["filter_type"] == "eq":
                 conditions.append(attrib == value["value"])
             else:
-                raise ValueError(f"Invalid type: {value['type']}")
+                raise ValueError(f"Invalid type: {value['filter_type']}")
             
         # 全ての条件をand_で結合してfilterに適用
         query = query.filter(and_(*conditions))
@@ -93,7 +101,7 @@ class SqlUtils:
 
 class DocumentListTable(Base):
     __tablename__ = 'document_list_table'
-    
+
     docID = Column(String, primary_key=True)
     edinetCode = Column(String)
     secCode = Column(String)
@@ -122,6 +130,26 @@ class DocumentListTable(Base):
     englishDocFlag = Column(String)
     csvFlag = Column(String)
     legalStatus = Column(String)
+    
+class SecuritiesReportTable(Base):
+    __tablename__ = 'securities_report_table'
+
+    docID = Column(String, primary_key=True)
+    edinetCode = Column(String, primary_key=True)
+    docTypeCode = Column(String)
+    fiscalYear = Column(String)
+    period = Column(String)
+    filePrefix = Column(String)
+    elementId = Column(String, primary_key=True)
+    itemName = Column(String)
+    contextId = Column(String, primary_key=True)
+    relativeFiscalYear = Column(String)
+    consolidatedOrIndividual = Column(String)
+    periodOrPointInTime = Column(String)
+    unitId = Column(String)
+    unit = Column(String)
+    value = Column(String)
+    submitDateTime = Column(String)
 
 # 使用例
 if __name__ == "__main__":

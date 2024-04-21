@@ -4,6 +4,7 @@ import config
 from datetime import datetime, timedelta
 import pandas as pd
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String
+from sqlalchemy.ext.declarative import declarative_base
 import time
 import uuid
 import tempfile
@@ -12,7 +13,7 @@ import numpy as np
 from shutil import copyfileobj
 from zipfile import ZipFile
 from src.common.logger import SimpleLogger
-from src.utils.sql_utils import SqlUtils, DocumentListTable
+from src.utils.sql_utils import SqlUtils, DocumentListTable, SecuritiesReportTable
 
 class EdinetUtils:
 
@@ -296,11 +297,9 @@ class EdinetUtils:
 
         self.logger.info("end: save_account_tag_to_db")
     
-    def save_edinet_csv_doc_to_db(self, edinet_code: str, target_date_start: str, target_date_end: str, doc_types: list[str] = ["120"]):
-        # TODO: 有価証券報告書以外も対応
+    def save_edinet_csv_doc_to_db(self, edinet_code: str, target_date_start: str, target_date_end: str, doc_types: list[str] = ["120", "140", "160"], org_file_prefix_list: list[str] = ["jpcrp030000", "jpcrp040300", "jpcrp050000"]):
         self.logger.info("start: save_edinet_doc_to_db")
         response = self.get_doc_id_list(edinet_code, target_date_start, target_date_end, doc_types)
-        org_file_prefix = "jpcrp030000"
 
         target_dfs = []
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -313,6 +312,7 @@ class EdinetUtils:
                 self.logger.info(f"doc_description: {document_list.filerName}")
                 doc_id = document_list.docID
                 edinet_code = document_list.edinetCode
+                doc_type_code = document_list.docTypeCode
                 status_code, file_path, doc_id, edinet_code = self.download_document(doc_id=doc_id, edinet_code=edinet_code, download_type=5)
                 if status_code == 200:
                     self.logger.info(f"file_path: {file_path}")
@@ -322,31 +322,39 @@ class EdinetUtils:
                             # プレフィックスが一致するファイルを探す
                             file_path = file_info.filename
                             _, filename = os.path.split(file_info.filename)
-                            if filename.startswith(org_file_prefix):
-                                # # ファイルの拡張子を保持
-                                # extension = os.path.splitext(filename)[1]
-                                # # 新しいファイル名を設定（拡張子を含む）
-                                # full_new_file_name = f"{doc_id}_{edinet_code}{extension}"
-                                # # 新しいファイルパスを設定
-                                # new_file_path = os.path.join(temp_dir, full_new_file_name)
-                                
-                                # target_files.append(new_file_path)
-                                # # ZIPファイル内のファイルを新しいファイル名で抽出（コピー）
-                                # with zip_ref.open(file_info) as source, open(new_file_path, 'wb') as target:
-                                #     copyfileobj(source, target)
-                                file_dates = re.findall(r'\d{4}-\d{2}-\d{2}', filename)
-                                target_df = pd.read_csv(zip_ref.open(file_info), encoding='utf-16-le', sep='\t')
-                                target_df['fiscalYear'] = file_dates[0]
-                                target_df['submitDateTime'] = file_dates[1]
-                                target_df['docID'] = doc_id
-                                target_df['edinetCode'] = edinet_code
-                                target_dfs.append(target_df)
+                            is_finished = False
+                            for org_file_prefix in org_file_prefix_list:
+                                if filename.startswith(org_file_prefix):
+                                    period = "full"
+                                    # # ファイルの拡張子を保持
+                                    if org_file_prefix == "jpcrp040300":
+                                        splited_value = filename.split("-")
+                                        period = splited_value[1]
+                                    if org_file_prefix == "jpcrp050000":
+                                        period = "half"
+
+                                    file_dates = re.findall(r'\d{4}-\d{2}-\d{2}', filename)
+                                    target_df = pd.read_csv(zip_ref.open(file_info), encoding='utf-16-le', sep='\t')
+                                    target_df['fiscalYear'] = file_dates[0]
+                                    target_df['submitDateTime'] = file_dates[1]
+                                    target_df['docID'] = doc_id
+                                    target_df['edinetCode'] = edinet_code
+                                    target_df['docTypeCode'] = doc_type_code
+                                    target_df['period'] = period
+                                    target_df['filePrefix'] = org_file_prefix
+                                    target_dfs.append(target_df)
+                                    is_finished = True
+                                    break
+                            if is_finished:
                                 break
         
         column_name_mapping = {
             'docID': 'docID',
             'edinetCode': 'edinetCode',
+            'docTypeCode': 'docTypeCode',
             'fiscalYear': 'fiscalYear',
+            'period': 'period',
+            'filePrefix': 'filePrefix',
             '要素ID': 'elementId',
             '項目名': 'itemName',
             'コンテキストID': 'contextId',
@@ -359,6 +367,7 @@ class EdinetUtils:
             'submitDateTime': 'submitDateTime'
         }
 
+
         combined_df = pd.concat(target_dfs, ignore_index=True)
         combined_df.rename(columns=column_name_mapping, inplace=True)
         combined_df = combined_df.drop_duplicates()
@@ -367,11 +376,117 @@ class EdinetUtils:
         print(combined_df.columns)
 
         engine = create_engine(f'sqlite:///{config.EDINET_DB}')
-        combined_df.to_sql('securities_report_table', con=engine, if_exists='replace', index=False)
+        SecuritiesReportTable.metadata.create_all(engine)
+        existing_df = pd.read_sql_table('securities_report_table', con=engine)
+        combined_df = pd.concat([existing_df, combined_df], ignore_index=True)
+        combined_df = combined_df.drop_duplicates(subset=['docID', 'edinetCode', 'elementId', 'contextId'], keep='first')
+        final_df = combined_df[~combined_df.index.isin(existing_df.index)]
+        print(final_df.head(10))
 
-        # output_file_path = os.path.join(config.DOWNLOAD_PATH, "edinet_type_9.xlsx")
+        # combined_df.to_sql('securities_report_table', con=engine, if_exists='replace', index=True)
+        final_df.to_sql('securities_report_table', con=engine, if_exists='append', index=False)
+
         self.logger.info("end: save_edinet_doc_to_db")
 
+    def get_by_element_id(self, element_id: str, fiscal_year: str, edinet_id: str, period: list[str] = ["full", "half", "q1r", "q2r", "q3r"], doc_id: str = None, relative_fiscal_year: str = "当期") -> pd.DataFrame:
+        self.logger.info("start: get_by_element_id")
+
+        database_url = f'sqlite:///{config.EDINET_DB}'
+        manager = SqlUtils(database_url, SecuritiesReportTable)
+        select_conditions = {
+            "elementId": {"type": "string", "filter_type": "eq", "value": element_id},
+            "fiscalYear": {"type": "string", "filter_type": "eq", "value": fiscal_year},
+            "edinetCode": {"type": "string", "filter_type": "eq", "value": edinet_id},
+            "period": {"type": "string", "filter_type": "in", "values": period},
+            "relativeFiscalYear": {"type": "string", "filter_type": "eq", "value": relative_fiscal_year}
+        }
+        if doc_id:
+            select_conditions["docID"] = {"type": "string", "filter_type": "eq", "value": doc_id}
+        
+        self.logger.info(select_conditions)
+        query_response = manager.get_with_compound_conditions(**select_conditions)
+        print(len(query_response))
+        
+        column_names = [column.name for column in SecuritiesReportTable.__table__.columns]
+
+        result_dict_list = []
+
+        for securities_report_table in query_response:
+            curr_result_dict = {}
+            for column_name in column_names:
+                curr_result_dict[column_name] = getattr(securities_report_table, column_name)
+            if curr_result_dict:
+                result_dict_list.append(curr_result_dict)
+        
+        result_df = pd.DataFrame(result_dict_list)
+        self.logger.info(result_df.head(10))
+
+        self.logger.info("end: get_by_element_id")
+
+        return result_df
+    
+    def get_edinet_codes(self) -> pd.DataFrame:
+        
+        self.logger.info("start: get_edinet_codes")
+
+        database_url = f'sqlite:///{config.EDINET_DB}'
+        manager = SqlUtils(database_url, DocumentListTable)
+        columns = ["edinetCode"]
+
+        select_conditions = {
+            "edinetCode": {"type": "string", "filter_type": "is_not_null"},
+        }
+        query_response = manager.get_with_compound_conditions(distinct=True, columns=columns, **select_conditions)
+
+
+        edinet_codes = []
+        for edinet_code_table in query_response:
+            for column_name in columns:
+                edinet_codes.append(getattr(edinet_code_table, column_name))
+        self.logger.info("end: get_edinet_codes")
+        return edinet_codes
+    
+    def save_all_edinet_csv_doc_to_db(self, target_date_start: str, target_date_end: str):
+        self.logger.info("start: save_all_edinet_csv_doc_to_db")
+
+        edinet_codes_df = self.get_edinet_codes_df()
+        for edinet_code in edinet_codes_df["edinetCode"]:
+            try:
+                self.save_edinet_csv_doc_to_db(edinet_code, target_date_start, target_date_end)
+            except Exception as e:
+                self.logger.error(e)
+                continue 
+
+        self.logger.info("end: save_all_edinet_csv_doc_to_db")
+
+    def get_edinet_codes_df(self) -> pd.DataFrame:
+        
+        self.logger.info("start: get_edinet_codes")
+
+        database_url = f'sqlite:///{config.EDINET_DB}'
+        manager = SqlUtils(database_url, DocumentListTable)
+        columns = ["edinetCode", "filerName"]
+
+        select_conditions = {
+            "edinetCode": {"type": "string", "filter_type": "is_not_null"},
+        }
+        query_response = manager.get_with_compound_conditions(distinct=True, columns=columns, **select_conditions)
+
+
+        result_dict_list = []
+        for edinet_code_table in query_response:
+            curr_result_dict = {}
+            for column_name in columns:
+                curr_result_dict[column_name] = getattr(edinet_code_table, column_name)
+            if curr_result_dict:
+                result_dict_list.append(curr_result_dict)
+        
+        result_df = pd.DataFrame(result_dict_list)
+        print(len(result_df))
+        self.logger.info(result_df[result_df["edinetCode"]=="E12460"])
+
+        self.logger.info("end: get_edinet_codes")
+        return result_df
 if __name__ == '__main__':
     edinet_utils = EdinetUtils()
     # res = edinet_utils.download_document(doc_id="S100SQL8")
@@ -379,7 +494,14 @@ if __name__ == '__main__':
     # edinet_utils.get_doc_infos(days=3653)
     # get_doc_infos(days=3653)
     # df = pd.read_hdf('data/edinet.h5', key='document_list')
-    edinet_utils.save_tag_to_db("data/excel/ESE140114.xlsx")
-    edinet_utils.save_account_tag_to_db("data/excel/ESE140115.xlsx")
-    # edinet_utils.save_edinet_csv_doc_to_db("E00015", "2000-01-01", "2024-03-20", ["120"])
+    # edinet_utils.save_tag_to_db("data/excel/ESE140114.xlsx")
+    # edinet_utils.save_account_tag_to_db("data/excel/ESE140115.xlsx")
+    # edinet_utils.save_edinet_csv_doc_to_db("E00015", "2020-01-01", "2024-04-20")
+    # edinet_utils.save_edinet_csv_doc_to_db("E04430", "2020-01-01", "2024-04-20")
+    edinet_utils.save_all_edinet_csv_doc_to_db("2000-01-01", "2024-04-20")
+    res = edinet_utils.get_by_element_id("jppfs_cor:NetSales", "2023-03-31", "E00015")
+    # res = edinet_utils.get_edinet_codes_df()
+    # res.to_csv("data/edinet_codes.csv", index=False)
+
+    
     
