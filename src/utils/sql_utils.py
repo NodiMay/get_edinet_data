@@ -151,6 +151,24 @@ class SecuritiesReportTable(Base):
     value = Column(String)
     submitDateTime = Column(String)
 
+class EdinetcodeTable(Base):
+    __tablename__ = 'edinetcode_table'
+
+    edinetCode = Column(String, primary_key=True)
+    submitterType = Column(String)
+    listedSection = Column(String)
+    consolidation = Column(String)
+    capital = Column(String)
+    fiscalYearEnd = Column(String)
+    submitterName = Column(String)
+    submitterNameEn = Column(String)
+    submitterNameKana = Column(String)
+    address = Column(String)
+    industry = Column(String)
+    securityCode = Column(String)
+    corporateNumber = Column(String)
+
+
 # 使用例
 if __name__ == "__main__":
     database_url = f'sqlite:///{config.EDINET_DB}'
